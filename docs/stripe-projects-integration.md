@@ -6,6 +6,8 @@ Last verified: 2026-10-18
 
 The Projects plugin and Stripe CLI authentication are verified, and the live Stripe Projects catalog was queried. The user authorized Neon PostgreSQL Free at $0, but no Projects app or database has been initialized or provisioned. Initialization is blocked because the active Stripe CLI context is Test Mode and the installed Projects plugin requires live-mode credentials to create the project. The user has explicitly chosen to retain Test Mode. Database connectivity is therefore untested.
 
+The official `stripe-projects` agent skill was installed from `https://docs.stripe.com` into `.agents/skills/stripe-projects/` for this project. Its read-only status check, `stripe projects status --json`, returned `NO_PROJECT_CONFIG` (“No project initialized in this directory”) and metadata `project_initialized: false`; it did not establish a Projects-authenticated state. The skill's next normal workflow step is `stripe projects init --accept-tos --yes --json`, but the skill does not describe a Test-Mode-only alternative. That init step was not run because the existing Test Mode boundary and no-init instruction remain in force.
+
 ## Latest initialization result and mode blocker
 
 After the user authorized the Stripe CLI in the **Test mode** sandbox, the CLI was run once with the approved manual-init options:
@@ -101,6 +103,8 @@ cd /mnt/c/Users/USER/Desktop/Rivet
 /home/xbt/.local/bin/stripe projects catalog database --json
 /home/xbt/.local/bin/stripe projects catalog Railway --json
 /home/xbt/.local/bin/stripe projects catalog Neon --json
+npx skills add https://docs.stripe.com  # selected stripe-projects; project scope
+/home/xbt/.local/bin/stripe projects status --json  # returned NO_PROJECT_CONFIG; read-only
 git check-ignore -q .env
 git diff --check
 ```
