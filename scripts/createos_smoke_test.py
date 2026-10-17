@@ -11,12 +11,24 @@ import argparse
 import json
 import os
 import sys
+import time
+import uuid
 
-from createos import Client, CreateSandboxRequest, RunCommandRequest, WaitOptions
+from createos import (
+    Client,
+    APIError,
+    CreateSandboxRequest,
+    ListSandboxesOptions,
+    RequestOptions,
+    RetryOptions,
+    RunCommandRequest,
+    WaitOptions,
+)
 
 
 SHAPE = "s-1vcpu-256mb"
 ROOTFS = "devbox:1"
+EGRESS_RULES = ["127.0.0.1"]
 REMOTE_INPUT = "/tmp/rivet-smoke-input.txt"
 REMOTE_OUTPUT = "/tmp/rivet-smoke-output.txt"
 INPUT_CONTENT = b"RIVET_UPLOAD_PAYLOAD"
@@ -29,6 +41,23 @@ def result_record(response) -> dict[str, object]:
         "stderr": result.standard_error,
         "exit_code": result.exit_code,
     }
+
+
+def safe_error_record(exc: Exception) -> dict[str, object]:
+    secret = os.environ.get("CREATEOS_API_KEY", "")
+    message = str(exc)
+    if secret:
+        message = message.replace(secret, "[REDACTED]")
+    record: dict[str, object] = {
+        "type": type(exc).__name__,
+        "message": message,
+    }
+    if isinstance(exc, APIError):
+        record["http_status"] = exc.status_code
+        record["api_code"] = exc.code
+        if exc.request_id:
+            record["request_id"] = exc.request_id
+    return record
 
 
 def main() -> int:
@@ -58,8 +87,11 @@ def main() -> int:
         "file_transfer": {"status": "not tested"},
         "cleanup": {"status": "not started"},
     }
-    client = Client()
+    client = Client(retry=RetryOptions(max_retries=0))
     sandbox = None
+    sandbox_name = f"rivet-smk-{uuid.uuid4().hex[:10]}"
+    create_attempted = False
+    creation_started = None
     passed = False
 
     try:
@@ -67,13 +99,24 @@ def main() -> int:
         report["authentication"] = "verified"
 
         # No environment variables or credentials are passed into the sandbox.
-        # Egress is not configured here; this test makes no isolation claim.
+        # Only loopback is allowlisted; the test makes no isolation claim.
+        creation_started = time.monotonic()
+        create_attempted = True
         sandbox = client.create_sandbox(
-            CreateSandboxRequest(shape=SHAPE, rootfs=ROOTFS)
+            CreateSandboxRequest(
+                shape=SHAPE,
+                rootfs=ROOTFS,
+                name=sandbox_name,
+                egress_rules=EGRESS_RULES,
+            ),
+            RequestOptions(disable_retry=True),
         )
         sandbox_record = report["sandbox"]
         assert isinstance(sandbox_record, dict)
         sandbox_record["status"] = str(sandbox.status)
+        sandbox_record["egress_rules"] = list(sandbox.data.egress_rules)
+        if sandbox.data.egress_rules != EGRESS_RULES:
+            raise RuntimeError("server did not confirm the requested egress rules")
 
         success = sandbox.run_command(
             RunCommandRequest(
@@ -123,7 +166,11 @@ def main() -> int:
             "upload_bytes": len(INPUT_CONTENT),
             "downloaded_content": downloaded.decode("utf-8", errors="replace"),
         }
-        report["egress"] = "not configured or tested"
+        report["egress"] = {
+            "requested_rules": EGRESS_RULES,
+            "server_reported_rules": list(sandbox.data.egress_rules),
+            "external_connectivity_probe": "not performed",
+        }
 
         success_result = success.result
         failure_result = failure.result
@@ -140,17 +187,48 @@ def main() -> int:
         report["overall"] = "passed" if passed else "failed"
     except Exception as exc:  # Keep SDK exceptions from exposing request data.
         report["overall"] = "failed"
-        report["error_type"] = type(exc).__name__
+        report["error"] = safe_error_record(exc)
     finally:
-        if sandbox is not None:
+        cleanup_targets = [sandbox] if sandbox is not None else []
+        if sandbox is None and create_attempted:
             try:
-                sandbox.destroy()
-                sandbox.wait_until_destroyed(WaitOptions(timeout=120.0))
-                report["cleanup"] = {"status": "destroyed"}
+                cleanup_targets = [
+                    candidate
+                    for candidate in client.list_sandboxes(
+                        ListSandboxesOptions(limit=500)
+                    )
+                    if candidate.name == sandbox_name
+                ]
             except Exception as exc:
-                report["cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                report["cleanup"] = {
+                    "status": "lookup_failed",
+                    "error": safe_error_record(exc),
+                }
                 passed = False
                 report["overall"] = "failed"
+
+        if cleanup_targets:
+            try:
+                for target in cleanup_targets:
+                    target.destroy()
+                    target.wait_until_destroyed(WaitOptions(timeout=120.0))
+                report["cleanup"] = {
+                    "status": "destroyed",
+                    "matching_sandboxes": len(cleanup_targets),
+                }
+                if creation_started is not None:
+                    report["lifecycle_wall_seconds"] = round(
+                        time.monotonic() - creation_started, 3
+                    )
+            except Exception as exc:
+                report["cleanup"] = {
+                    "status": "failed",
+                    "error": safe_error_record(exc),
+                }
+                passed = False
+                report["overall"] = "failed"
+        elif report["cleanup"].get("status") != "lookup_failed":
+            report["cleanup"] = {"status": "no sandbox created"}
         client.close()
 
     print(json.dumps(report, indent=2, sort_keys=True))

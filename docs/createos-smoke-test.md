@@ -2,14 +2,16 @@
 
 ## Status
 
-**Prepared, not executed.** Read-only authentication and catalog calls succeeded,
-but sandbox creation was not attempted because the account's billing-credit
-balance is not exposed by the installed SDK's `who_am_i()` response. CreateOS
-documents per-second resource billing. The test script requires an explicit
-`--confirm-billable-sandbox` flag before it can create a sandbox.
+**PASSED.** One `s-1vcpu-256mb` sandbox was created using `devbox:1`; its
+loopback-only egress rule was confirmed in the CreateOS response. All test
+commands ran inside that sandbox, file transfer passed, and the sandbox was
+destroyed. No credentials were passed into the guest.
 
-No stdout, stderr, execution exit codes, file-transfer result, or cleanup result
-are reported as test outcomes because no sandbox was created.
+Two earlier create requests were rejected by API validation because the
+temporary sandbox name exceeded the 22-character limit. The API returned HTTP
+400 and the cleanup lookup found no matching resource for either attempt. The
+corrected script disables create retries and the successful run created one
+sandbox.
 
 ## Verified locally
 
@@ -18,7 +20,7 @@ are reported as test outcomes because no sandbox was created.
 - The read-only identity response reported zero active sandboxes.
 - The live shape catalog includes `s-1vcpu-256mb`.
 - The live root-filesystem catalog includes `devbox:1`.
-- No sandbox, database, or other remote resource was created.
+- No sandbox is created by the read-only preflight checks.
 
 ## SDK methods confirmed in the installed package
 
@@ -39,15 +41,50 @@ and file transfer patterns: [CreateOS Sandbox SDKs](https://createos.sh/docs/San
 
 ## Test design
 
-When authorized, `scripts/createos_smoke_test.py` creates one
-`s-1vcpu-256mb` sandbox using `devbox:1`, runs Python code in that sandbox,
-captures the success and deliberate-exception results, tests upload and
-download, and destroys the sandbox in `finally`. It does not pass the API key or
-other environment variables to the guest. The script does not configure or test
-egress and makes no isolation claim.
+`scripts/createos_smoke_test.py` created one `s-1vcpu-256mb` sandbox using
+`devbox:1`, ran Python code in the sandbox, captured success and deliberate
+exception results, tested upload and download, and destroyed the sandbox in
+`finally`. The create request set the egress allowlist to `127.0.0.1`, and the
+CreateOS response reported that same rule. The test did not probe external
+connectivity, so egress enforcement was not independently tested.
 
-The script emits only sanitized test output and exception class names; it does
-not print or serialize the API token.
+The script emits only test output and sanitized API error fields; it does not
+print or serialize the API token. SDK retries are disabled for the sandbox
+creation request.
+
+## Actual execution results
+
+All three executions were returned by `SandboxInstance.run_command`:
+
+| Execution | Exit code | stdout | stderr |
+| --- | ---: | --- | --- |
+| Successful Python | 0 | `RIVET_CREATEOS_SMOKE_OK\n` | empty |
+| Deliberate exception | 1 | empty | See traceback below |
+| Guest file creation | 0 | `RIVET_FILE_EXECUTION_OK\n` | empty |
+
+Actual stderr from the deliberate exception:
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    raise RuntimeError('RIVET_INTENTIONAL_FAILURE')
+RuntimeError: RIVET_INTENTIONAL_FAILURE
+```
+
+File transfer passed: 20 bytes were uploaded, Python inside the sandbox read
+the uploaded file and created an output file, and the SDK downloaded
+`RIVET_FILE_CREATED:RIVET_UPLOAD_PAYLOAD`.
+
+Cleanup returned `destroyed` for one matching sandbox. The measured end-to-end
+wall-clock lifecycle was 2.058 seconds.
+
+The read-only account metrics query for the surrounding 10-minute window
+reported one sandbox spawned and one destroyed, with aggregate lifetime
+1.627944 seconds, `1.627944` vCPU-seconds, `416.753664` MiB-seconds of memory,
+and `16670.14656` MiB-seconds of disk. These are account-wide metrics, not a
+per-sandbox invoice. The metrics response exposed no price, charge, or credit
+fields, so the actual monetary/credit charge is unavailable from the API data
+queried. The wall-clock duration is not presented as a billing duration.
 
 ## Billing and next action
 
@@ -57,13 +94,13 @@ free credits for new accounts, but the account's balance was not verified. See
 [Sandbox limits and defaults](https://createos.sh/docs/Sandbox/Limits/) and
 [CreateOS pricing](https://createos.sh/docs/Account-Billing/Pricing/).
 
-After approval to create one short-lived sandbox, run from WSL in the project
-directory:
+Run from WSL in the project directory:
 
 ```bash
 source $HOME/.config/rivet/createos.env
 .venv/bin/python scripts/createos_smoke_test.py --confirm-billable-sandbox
 ```
 
-Then replace this status section with the actual sanitized output and cleanup
-result. Do not infer successful execution from the installed SDK or docs alone.
+The script records observed wall-clock lifecycle duration. The installed SDK
+does not return a per-run charge. CreateOS's account metrics report aggregate
+resource usage, not an invoice amount; see [Sandbox metrics](https://createos.sh/docs/Sandbox/REST-API/Metrics/).
